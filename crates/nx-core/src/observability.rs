@@ -862,6 +862,62 @@ mod tests {
         assert!(rendered.contains("numax_store_bytes 42"));
     }
 
+    fn assert_histogram(records: &[Duration], expected_buckets: [u64; 15], expected_sum_ns: u64) {
+        let histogram = DurationHistogram::default();
+        for duration in records {
+            histogram.record(*duration);
+        }
+        let snapshot = histogram.snapshot();
+        assert_eq!(snapshot.buckets, expected_buckets);
+        assert_eq!(snapshot.count, records.len() as u64);
+        assert_eq!(snapshot.sum_ns, expected_sum_ns);
+    }
+
+    #[test]
+    fn duration_histogram_places_values_on_below_and_above_bucket_bounds() {
+        let first_upper_ns = REMOTE_OP_APPLY_BUCKETS[0].1;
+
+        assert_histogram(
+            &[Duration::from_nanos(first_upper_ns)],
+            std::array::from_fn(|index| u64::from(index == 0)),
+            first_upper_ns,
+        );
+        assert_histogram(
+            &[Duration::from_nanos(first_upper_ns - 1)],
+            std::array::from_fn(|index| u64::from(index == 0)),
+            first_upper_ns - 1,
+        );
+        assert_histogram(
+            &[Duration::from_nanos(first_upper_ns + 1)],
+            std::array::from_fn(|index| u64::from(index == 1)),
+            first_upper_ns + 1,
+        );
+    }
+
+    #[test]
+    fn duration_histogram_accumulates_overflow_in_count_without_finite_bucket() {
+        let overflow_ns = REMOTE_OP_APPLY_BUCKETS
+            .last()
+            .map(|(_, upper_bound_ns)| upper_bound_ns + 1)
+            .expect("histogram buckets");
+        let histogram = DurationHistogram::default();
+        histogram.record(Duration::from_nanos(overflow_ns));
+
+        let snapshot = histogram.snapshot();
+        assert_eq!(snapshot.count, 1);
+        assert_eq!(snapshot.sum_ns, overflow_ns);
+        assert_eq!(snapshot.buckets, [0; REMOTE_OP_APPLY_BUCKETS.len()]);
+
+        let mut rendered = String::new();
+        render_duration_histogram(
+            &mut rendered,
+            "numax_remote_op_batch_apply_duration_seconds",
+            "test",
+            &snapshot,
+        );
+        assert!(rendered.contains("_bucket{le=\"+Inf\"} 1"));
+    }
+
     #[test]
     fn remote_op_batch_histogram_renders_cumulative_buckets_sum_and_count() {
         let metrics = RuntimeMetrics::default();
